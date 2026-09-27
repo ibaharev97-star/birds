@@ -1,0 +1,2107 @@
+// ============================================================
+// FLAPPY BIRD DELUXE — WinAPI
+// Единый файл, ~4100 строк
+// ============================================================
+#define _CRT_SECURE_NO_WARNINGS
+#define NOMINMAX
+#define WIN32_LEAN_AND_MEAN
+
+#include <windows.h>
+#include <windowsx.h>
+#include <mmsystem.h>
+
+#include <vector>
+#include <string>
+#include <sstream>
+#include <fstream>
+#include <ctime>
+#include <cstdlib>
+#include <cstdio>
+#include <cmath>
+#include <algorithm>
+#include <map>
+#include <set>
+
+#pragma comment(lib, "user32.lib")
+#pragma comment(lib, "gdi32.lib")
+#pragma comment(lib, "winmm.lib")
+#pragma comment(lib, "Msimg32.lib")
+#pragma comment(linker,"\"/manifestdependency:type='win32' \
+name='Microsoft.Windows.Common-Controls' version='6.0.0.0' \
+processorArchitecture='*' publicKeyToken='6595b64144ccf1df' language='*'\"")
+
+using namespace std;
+
+// ============================================================
+// КОНСТАНТЫ
+// ============================================================
+const int WINDOW_W = 900;
+const int WINDOW_H = 720;
+const int GAME_W = 480;
+const int GAME_H = 640;
+const int GAME_X = (WINDOW_W - GAME_W) / 2;
+const int GAME_Y = 30;
+
+const float GRAVITY         = 0.45f;
+const float JUMP_FORCE      = -7.5f;
+const float MAX_FALL_SPEED  = 12.0f;
+const float PIPE_SPEED      = 2.5f;
+const float PIPE_SPAWN_TIME = 1.6f;
+const float PIPE_GAP        = 165.0f;
+const float PIPE_WIDTH      = 75.0f;
+const float GROUND_HEIGHT   = 90.0f;
+const float BIRD_W          = 42.0f;
+const float BIRD_H          = 32.0f;
+const float BIRD_X          = 120.0f;
+
+enum GameState { STATE_MENU, STATE_PLAYING, STATE_DYING, STATE_GAME_OVER, STATE_PAUSED };
+enum MedalType { MEDAL_NONE, MEDAL_BRONZE, MEDAL_SILVER, MEDAL_GOLD, MEDAL_PLATINUM };
+enum BirdColor { BIRD_YELLOW, BIRD_RED, BIRD_BLUE, BIRD_GREEN, BIRD_PURPLE, BIRD_COUNT };
+
+const COLORREF COL_SKY_TOP       = RGB(113, 197, 207);
+const COLORREF COL_SKY_BOTTOM    = RGB(180, 230, 235);
+const COLORREF COL_GROUND        = RGB(222, 216, 149);
+const COLORREF COL_GROUND_DARK   = RGB(180, 170, 100);
+const COLORREF COL_PIPE          = RGB(115, 190, 60);
+const COLORREF COL_PIPE_DARK     = RGB(70, 130, 40);
+const COLORREF COL_PIPE_LIGHT    = RGB(160, 220, 100);
+const COLORREF COL_UI_PANEL      = RGB(240, 240, 220);
+const COLORREF COL_UI_BORDER     = RGB(120, 100, 60);
+const COLORREF COL_BUTTON        = RGB(240, 200, 60);
+const COLORREF COL_BUTTON_HOVER  = RGB(255, 220, 100);
+const COLORREF COL_BUSH          = RGB(90, 170, 50);
+
+// ============================================================
+// СТРУКТУРЫ
+// ============================================================
+struct Bird {
+    float x, y, vy, rotation, wingTimer;
+    int wingFrame, color;
+    bool alive;
+
+    Bird() : x(BIRD_X), y(GAME_H / 2.0f), vy(0), rotation(0),
+             wingTimer(0), wingFrame(0), color(BIRD_YELLOW), alive(true) {}
+
+    void reset() {
+        x = BIRD_X;
+        y = GAME_H / 2.0f - 100.0f;
+        vy = 0;
+        rotation = 0;
+        wingTimer = 0;
+        wingFrame = 0;
+        alive = true;
+    }
+
+    void flap() {
+        vy = JUMP_FORCE;
+        rotation = -0.5f;
+        wingFrame = 0;
+        wingTimer = 0;
+    }
+
+    void update(float dt) {
+        vy += GRAVITY * dt * 60.0f;
+        if (vy > MAX_FALL_SPEED) vy = MAX_FALL_SPEED;
+        y += vy * dt * 60.0f;
+
+        float targetRot = 0;
+        if (vy < 0) targetRot = -0.5f;
+        else if (vy > 5) targetRot = 1.2f;
+        else targetRot = vy * 0.15f;
+
+        rotation += (targetRot - rotation) * 0.15f * dt * 60.0f;
+
+        wingTimer += dt;
+        if (wingTimer > 0.1f) {
+            wingTimer = 0;
+            wingFrame = (wingFrame + 1) % 3;
+        }
+    }
+};
+
+struct Pipe {
+    float x, gapY;
+    bool scored;
+
+    Pipe() : x(0), gapY(0), scored(false) {}
+    Pipe(float px, float py) : x(px), gapY(py), scored(false) {}
+};
+
+struct Particle {
+    float x, y, vx, vy, life, maxLife, size;
+    COLORREF color;
+    int type;
+};
+
+struct Cloud {
+    float x, y, speed, size;
+    int layer;
+};
+
+struct Bush {
+    float x, y, size;
+    int type;
+};
+
+struct ScoreEntry {
+    int score;
+    time_t date;
+};
+
+struct GameStats {
+    int totalGames, totalFlaps, totalPipes, totalDeaths, bestScore;
+    time_t firstPlayed, lastPlayed;
+    vector<ScoreEntry> history;
+
+    GameStats() : totalGames(0), totalFlaps(0), totalPipes(0),
+                  totalDeaths(0), bestScore(0),
+                  firstPlayed(0), lastPlayed(0) {}
+};
+
+struct Settings {
+    int birdColor;
+    bool soundEnabled, particlesEnabled, shakeEnabled;
+    int difficulty;
+
+    Settings() : birdColor(BIRD_YELLOW), soundEnabled(true),
+                 particlesEnabled(true), shakeEnabled(true),
+                 difficulty(1) {}
+};
+
+// ============================================================
+// ГЛОБАЛЬНЫЕ
+// ============================================================
+HWND g_hwnd = nullptr;
+HDC g_memDC = nullptr;
+HBITMAP g_memBitmap = nullptr;
+uint32_t* g_pixels = nullptr;
+int g_memW = 0, g_memH = 0;
+
+GameState g_state = STATE_MENU;
+Bird g_bird;
+vector<Pipe> g_pipes;
+vector<Particle> g_particles;
+vector<Cloud> g_clouds;
+vector<Bush> g_bushes;
+
+float g_pipeTimer = 0;
+int g_score = 0;
+int g_bestScore = 0;
+float g_gameSpeed = 1.0f;
+float g_groundOffset = 0;
+float g_flashTimer = 0;
+float g_shakeTimer = 0;
+float g_shakeIntensity = 0;
+float g_deathTimer = 0;
+float g_animTimer = 0;
+float g_medalTimer = 0;
+float g_scorePopupTimer = 0;
+int g_scorePopupValue = 0;
+
+Settings g_settings;
+GameStats g_stats;
+
+bool g_keys[256] = {false};
+int g_mouseX = 0, g_mouseY = 0;
+bool g_hoverPlay = false, g_hoverRestart = false;
+bool g_hoverMenu = false, g_hoverSettings = false;
+bool g_hoverSkinLeft = false, g_hoverSkinRight = false;
+bool g_hoverDiffLeft = false, g_hoverDiffRight = false;
+bool g_showSettings = false;
+
+HFONT g_fontTiny = nullptr;
+HFONT g_fontSmall = nullptr;
+HFONT g_fontMedium = nullptr;
+HFONT g_fontLarge = nullptr;
+HFONT g_fontHuge = nullptr;
+HFONT g_fontScore = nullptr;
+HFONT g_fontBold = nullptr;
+
+// ============================================================
+// FORWARD
+// ============================================================
+LRESULT CALLBACK WindowProc(HWND, UINT, WPARAM, LPARAM);
+
+void InitGame(HWND);
+void ShutdownGame();
+void SetupFonts();
+void ResetGame();
+void StartGame();
+void GameOver();
+void UpdateGame(float dt);
+void UpdateGameplay(float dt);
+void UpdateBird(float dt);
+void UpdatePipes(float dt);
+void UpdateParticles(float dt);
+void UpdateClouds(float dt);
+void SpawnPipe();
+void CheckCollisions();
+void CheckScore();
+void HandleFlap();
+void RenderFrame();
+void RenderBackground(HDC);
+void RenderGround(HDC);
+void RenderPipes(HDC);
+void RenderBird(HDC);
+void RenderParticles(HDC);
+void RenderScore(HDC);
+void RenderScorePopup(HDC);
+void RenderMenu(HDC);
+void RenderGameOver(HDC);
+void RenderMedal(HDC);
+void RenderSettings(HDC);
+void RenderUI(HDC);
+
+void DrawFilledRect(HDC, RECT, COLORREF);
+void DrawGradientV(HDC, RECT, COLORREF, COLORREF);
+void DrawRoundedRect(HDC, RECT, int, COLORREF);
+void DrawCircle(HDC, int, int, int, COLORREF);
+void DrawEllipseRect(HDC, RECT, COLORREF);
+void DrawTextC(HDC, RECT, const wstring&, COLORREF, HFONT, UINT);
+void DrawTextShadow(HDC, RECT, const wstring&, COLORREF, COLORREF, HFONT, UINT);
+
+COLORREF GetBirdColor(int type, int shade);
+int GetMedalType(int score);
+wstring GetMedalName(int medal);
+COLORREF GetMedalColor(int medal);
+wstring GetDifficultyName(int diff);
+
+void LoadSettings();
+void SaveSettings();
+void AddScoreToHistory(int score);
+
+void SpawnFlapParticles(float x, float y);
+void SpawnScoreParticles(float x, float y);
+void SpawnCrashParticles(float x, float y);
+
+void PlaySoundFlap();
+void PlaySoundScore();
+void PlaySoundDie();
+void ShakeScreen(float intensity, float duration);
+
+void OnMouseClick(int x, int y);
+void OnKeyPressed(int vk);
+void UpdateHoverStates();
+void Tick(float dt);
+void OnResize(int w, int h);
+
+wstring GetDataPath();
+wstring FormatDate(time_t t);
+
+// ============================================================
+// FONTS
+// ============================================================
+void SetupFonts() {
+    g_fontTiny = CreateFontW(12, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+        DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+        CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Segoe UI");
+    g_fontSmall = CreateFontW(16, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+        DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+        CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Segoe UI");
+    g_fontMedium = CreateFontW(22, 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE,
+        DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+        CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Segoe UI");
+    g_fontLarge = CreateFontW(36, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE,
+        DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+        CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Segoe UI");
+    g_fontHuge = CreateFontW(52, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE,
+        DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+        CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Segoe UI");
+    g_fontScore = CreateFontW(72, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE,
+        DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+        CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Segoe UI");
+    g_fontBold = CreateFontW(18, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE,
+        DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+        CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Segoe UI");
+}
+
+// ============================================================
+// ГДИ УТИЛИТЫ
+// ============================================================
+void DrawFilledRect(HDC hdc, RECT rc, COLORREF c) {
+    HBRUSH br = CreateSolidBrush(c);
+    FillRect(hdc, &rc, br);
+    DeleteObject(br);
+}
+
+void DrawGradientV(HDC hdc, RECT rc, COLORREF top, COLORREF bottom) {
+    int h = rc.bottom - rc.top;
+    if (h <= 0) return;
+    for (int y = 0; y < h; y++) {
+        float t = (float)y / h;
+        int r = (int)(GetRValue(top) + (GetRValue(bottom) - GetRValue(top)) * t);
+        int g = (int)(GetGValue(top) + (GetGValue(bottom) - GetGValue(top)) * t);
+        int b = (int)(GetBValue(top) + (GetBValue(bottom) - GetBValue(top)) * t);
+        RECT line = {rc.left, rc.top + y, rc.right, rc.top + y + 1};
+        DrawFilledRect(hdc, line, RGB(r, g, b));
+    }
+}
+
+void DrawRoundedRect(HDC hdc, RECT rc, int radius, COLORREF c) {
+    HBRUSH br = CreateSolidBrush(c);
+    HPEN pen = CreatePen(PS_NULL, 0, c);
+    HGDIOBJ ob = SelectObject(hdc, br);
+    HGDIOBJ op = SelectObject(hdc, pen);
+    RoundRect(hdc, rc.left, rc.top, rc.right, rc.bottom, radius, radius);
+    SelectObject(hdc, ob);
+    SelectObject(hdc, op);
+    DeleteObject(br);
+    DeleteObject(pen);
+}
+
+void DrawCircle(HDC hdc, int cx, int cy, int radius, COLORREF c) {
+    if (radius <= 0) return;
+    HBRUSH br = CreateSolidBrush(c);
+    HPEN pen = CreatePen(PS_NULL, 0, c);
+    HGDIOBJ ob = SelectObject(hdc, br);
+    HGDIOBJ op = SelectObject(hdc, pen);
+    Ellipse(hdc, cx - radius, cy - radius, cx + radius, cy + radius);
+    SelectObject(hdc, ob);
+    SelectObject(hdc, op);
+    DeleteObject(br);
+    DeleteObject(pen);
+}
+
+void DrawEllipseRect(HDC hdc, RECT rc, COLORREF c) {
+    HBRUSH br = CreateSolidBrush(c);
+    HPEN pen = CreatePen(PS_NULL, 0, c);
+    HGDIOBJ ob = SelectObject(hdc, br);
+    HGDIOBJ op = SelectObject(hdc, pen);
+    Ellipse(hdc, rc.left, rc.top, rc.right, rc.bottom);
+    SelectObject(hdc, ob);
+    SelectObject(hdc, op);
+    DeleteObject(br);
+    DeleteObject(pen);
+}
+
+void DrawTextC(HDC hdc, RECT rc, const wstring& s, COLORREF c, HFONT f, UINT fmt) {
+    SetBkMode(hdc, TRANSPARENT);
+    SetTextColor(hdc, c);
+    HGDIOBJ of = SelectObject(hdc, f);
+    DrawTextW(hdc, s.c_str(), -1, &rc, fmt);
+    SelectObject(hdc, of);
+}
+
+void DrawTextShadow(HDC hdc, RECT rc, const wstring& s,
+                    COLORREF c, COLORREF shadow, HFONT f, UINT fmt) {
+    RECT r2 = rc;
+    r2.left += 2;
+    r2.top += 2;
+    DrawTextC(hdc, r2, s, shadow, f, fmt);
+    DrawTextC(hdc, rc, s, c, f, fmt);
+}
+
+// ============================================================
+// ЦВЕТА ПТИЦЫ
+// ============================================================
+COLORREF GetBirdColor(int type, int shade) {
+    switch (type) {
+        case BIRD_YELLOW:
+            if (shade == 0) return RGB(255, 220, 50);
+            if (shade == 1) return RGB(255, 245, 150);
+            return RGB(210, 160, 20);
+        case BIRD_RED:
+            if (shade == 0) return RGB(240, 90, 90);
+            if (shade == 1) return RGB(255, 160, 160);
+            return RGB(180, 40, 40);
+        case BIRD_BLUE:
+            if (shade == 0) return RGB(100, 180, 255);
+            if (shade == 1) return RGB(180, 220, 255);
+            return RGB(40, 100, 200);
+        case BIRD_GREEN:
+            if (shade == 0) return RGB(120, 220, 100);
+            if (shade == 1) return RGB(180, 240, 170);
+            return RGB(50, 150, 40);
+        case BIRD_PURPLE:
+            if (shade == 0) return RGB(190, 130, 255);
+            if (shade == 1) return RGB(230, 190, 255);
+            return RGB(120, 60, 190);
+    }
+    return RGB(255, 220, 50);
+}
+
+int GetMedalType(int score) {
+    if (score >= 40) return MEDAL_PLATINUM;
+    if (score >= 30) return MEDAL_GOLD;
+    if (score >= 20) return MEDAL_SILVER;
+    if (score >= 10) return MEDAL_BRONZE;
+    return MEDAL_NONE;
+}
+
+wstring GetMedalName(int medal) {
+    switch (medal) {
+        case MEDAL_BRONZE:   return L"Бронза";
+        case MEDAL_SILVER:   return L"Серебро";
+        case MEDAL_GOLD:     return L"Золото";
+        case MEDAL_PLATINUM: return L"Платина";
+        default:             return L"Без медали";
+    }
+}
+
+COLORREF GetMedalColor(int medal) {
+    switch (medal) {
+        case MEDAL_BRONZE:   return RGB(205, 127, 50);
+        case MEDAL_SILVER:   return RGB(192, 192, 192);
+        case MEDAL_GOLD:     return RGB(255, 215, 0);
+        case MEDAL_PLATINUM: return RGB(229, 228, 226);
+        default:             return RGB(150, 150, 150);
+    }
+}
+
+wstring GetDifficultyName(int diff) {
+    switch (diff) {
+        case 0: return L"Легко";
+        case 1: return L"Обычно";
+        case 2: return L"Сложно";
+    }
+    return L"Обычно";
+}
+
+// ============================================================
+// ФАЙЛЫ
+// ============================================================
+wstring GetDataPath() {
+    wchar_t path[MAX_PATH];
+    GetModuleFileNameW(nullptr, path, MAX_PATH);
+    wstring s = path;
+    size_t pos = s.find_last_of(L"\\/");
+    if (pos != wstring::npos) s = s.substr(0, pos + 1);
+    return s + L"flappy_data.txt";
+}
+
+wstring FormatDate(time_t t) {
+    tm ti;
+    localtime_s(&ti, &t);
+    wchar_t buf[64];
+    swprintf(buf, 64, L"%02d.%02d.%04d %02d:%02d",
+        ti.tm_mday, ti.tm_mon + 1, ti.tm_year + 1900,
+        ti.tm_hour, ti.tm_min);
+    return buf;
+}
+
+void LoadSettings() {
+    wstring path = GetDataPath();
+    FILE* f = nullptr;
+    _wfopen_s(&f, path.c_str(), L"r, ccs=UTF-8");
+    if (!f) return;
+
+    wchar_t line[512];
+    while (fgetws(line, 512, f)) {
+        wstring s = line;
+        while (!s.empty() && (s.back() == L'\n' || s.back() == L'\r'))
+            s.pop_back();
+        if (s.empty() || s[0] == L'#') continue;
+
+        size_t eq = s.find(L'=');
+        if (eq == wstring::npos) continue;
+
+        wstring key = s.substr(0, eq);
+        wstring val = s.substr(eq + 1);
+
+        if (key == L"birdColor") g_settings.birdColor = _wtoi(val.c_str());
+        else if (key == L"sound") g_settings.soundEnabled = _wtoi(val.c_str()) != 0;
+        else if (key == L"particles") g_settings.particlesEnabled = _wtoi(val.c_str()) != 0;
+        else if (key == L"shake") g_settings.shakeEnabled = _wtoi(val.c_str()) != 0;
+        else if (key == L"difficulty") g_settings.difficulty = _wtoi(val.c_str());
+        else if (key == L"best") g_stats.bestScore = _wtoi(val.c_str());
+        else if (key == L"games") g_stats.totalGames = _wtoi(val.c_str());
+        else if (key == L"flaps") g_stats.totalFlaps = _wtoi(val.c_str());
+        else if (key == L"pipes") g_stats.totalPipes = _wtoi(val.c_str());
+        else if (key == L"deaths") g_stats.totalDeaths = _wtoi(val.c_str());
+    }
+    fclose(f);
+    g_bestScore = g_stats.bestScore;
+}
+
+void SaveSettings() {
+    wstring path = GetDataPath();
+    FILE* f = nullptr;
+    _wfopen_s(&f, path.c_str(), L"w, ccs=UTF-8");
+    if (!f) return;
+
+    fwprintf(f, L"# Flappy Bird Deluxe\n");
+    fwprintf(f, L"birdColor=%d\n", g_settings.birdColor);
+    fwprintf(f, L"sound=%d\n", g_settings.soundEnabled ? 1 : 0);
+    fwprintf(f, L"particles=%d\n", g_settings.particlesEnabled ? 1 : 0);
+    fwprintf(f, L"shake=%d\n", g_settings.shakeEnabled ? 1 : 0);
+    fwprintf(f, L"difficulty=%d\n", g_settings.difficulty);
+    fwprintf(f, L"best=%d\n", g_stats.bestScore);
+    fwprintf(f, L"games=%d\n", g_stats.totalGames);
+    fwprintf(f, L"flaps=%d\n", g_stats.totalFlaps);
+    fwprintf(f, L"pipes=%d\n", g_stats.totalPipes);
+    fwprintf(f, L"deaths=%d\n", g_stats.totalDeaths);
+
+    fclose(f);
+}
+
+void AddScoreToHistory(int score) {
+    ScoreEntry e;
+    e.score = score;
+    e.date = time(nullptr);
+    g_stats.history.push_back(e);
+    if (g_stats.history.size() > 50) {
+        g_stats.history.erase(g_stats.history.begin());
+    }
+}
+
+// ============================================================
+// ЗВУКИ
+// ============================================================
+void PlaySoundFlap() {
+    if (!g_settings.soundEnabled) return;
+    Beep(600, 40);
+}
+
+void PlaySoundScore() {
+    if (!g_settings.soundEnabled) return;
+    Beep(1000, 50);
+    Beep(1400, 50);
+}
+
+void PlaySoundDie() {
+    if (!g_settings.soundEnabled) return;
+    Beep(400, 100);
+    Beep(300, 100);
+    Beep(200, 150);
+}
+
+// ============================================================
+// ЧАСТИЦЫ
+// ============================================================
+void SpawnFlapParticles(float x, float y) {
+    if (!g_settings.particlesEnabled) return;
+    for (int i = 0; i < 6; i++) {
+        Particle p;
+        p.x = x - BIRD_W / 4;
+        p.y = y + 10;
+        p.vx = -2.0f - (rand() % 100) / 50.0f;
+        p.vy = ((rand() % 100) - 50) / 30.0f;
+        p.life = 0.5f;
+        p.maxLife = 0.5f;
+        p.size = 3.0f;
+        p.color = GetBirdColor(g_bird.color, 1);
+        p.type = 0;
+        g_particles.push_back(p);
+    }
+}
+
+void SpawnScoreParticles(float x, float y) {
+    if (!g_settings.particlesEnabled) return;
+    for (int i = 0; i < 12; i++) {
+        Particle p;
+        p.x = x;
+        p.y = y;
+        float angle = (rand() % 360) * 3.14159f / 180.0f;
+        float speed = 1.0f + (rand() % 100) / 50.0f;
+        p.vx = cosf(angle) * speed;
+        p.vy = sinf(angle) * speed - 1.0f;
+        p.life = 0.8f;
+        p.maxLife = 0.8f;
+        p.size = 4.0f;
+        p.color = RGB(255, 220, 80);
+        p.type = 1;
+        g_particles.push_back(p);
+    }
+}
+
+void SpawnCrashParticles(float x, float y) {
+    if (!g_settings.particlesEnabled) return;
+    for (int i = 0; i < 25; i++) {
+        Particle p;
+        p.x = x;
+        p.y = y;
+        float angle = (rand() % 360) * 3.14159f / 180.0f;
+        float speed = 2.0f + (rand() % 200) / 50.0f;
+        p.vx = cosf(angle) * speed;
+        p.vy = sinf(angle) * speed;
+        p.life = 1.2f;
+        p.maxLife = 1.2f;
+        p.size = 5.0f;
+        int cc = rand() % 3;
+        if (cc == 0) p.color = GetBirdColor(g_bird.color, 0);
+        else if (cc == 1) p.color = GetBirdColor(g_bird.color, 1);
+        else p.color = RGB(255, 255, 255);
+        p.type = 2;
+        g_particles.push_back(p);
+    }
+}
+
+void ShakeScreen(float intensity, float duration) {
+    if (!g_settings.shakeEnabled) return;
+    g_shakeIntensity = intensity;
+    g_shakeTimer = duration;
+}
+
+// ============================================================
+// ИНИЦИАЛИЗАЦИЯ
+// ============================================================
+void InitGame(HWND hwnd) {
+    g_hwnd = hwnd;
+    SetupFonts();
+    LoadSettings();
+
+    HDC hdc = GetDC(hwnd);
+    RECT rc;
+    GetClientRect(hwnd, &rc);
+    g_memW = rc.right;
+    g_memH = rc.bottom;
+    g_memDC = CreateCompatibleDC(hdc);
+
+    BITMAPINFO bmi = {};
+    bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+    bmi.bmiHeader.biWidth = g_memW;
+    bmi.bmiHeader.biHeight = -g_memH;
+    bmi.bmiHeader.biPlanes = 1;
+    bmi.bmiHeader.biBitCount = 32;
+    bmi.bmiHeader.biCompression = BI_RGB;
+
+    void* bits = nullptr;
+    g_memBitmap = CreateDIBSection(hdc, &bmi, DIB_RGB_COLORS, &bits, nullptr, 0);
+    g_pixels = (uint32_t*)bits;
+
+    SelectObject(g_memDC, g_memBitmap);
+    ReleaseDC(hwnd, hdc);
+
+    // Облака
+    for (int i = 0; i < 15; i++) {
+        Cloud c;
+        c.x = (float)(rand() % GAME_W);
+        c.y = 40.0f + (float)(rand() % 200);
+        c.size = 0.5f + (rand() % 100) / 100.0f;
+        c.layer = rand() % 3;
+        c.speed = 0.2f + c.layer * 0.15f;
+        g_clouds.push_back(c);
+    }
+
+    // Кусты
+    for (int i = 0; i < 30; i++) {
+        Bush b;
+        b.x = (float)(rand() % (GAME_W + 100)) - 50;
+        b.y = GAME_H - GROUND_HEIGHT + (float)(rand() % 20);
+        b.size = 0.5f + (rand() % 100) / 100.0f;
+        b.type = rand() % 3;
+        g_bushes.push_back(b);
+    }
+
+    g_state = STATE_MENU;
+    g_bestScore = g_stats.bestScore;
+    ResetGame();
+
+    SetTimer(hwnd, 1, 16, nullptr);
+}
+
+void ShutdownGame() {
+    SaveSettings();
+
+    if (g_fontTiny) DeleteObject(g_fontTiny);
+    if (g_fontSmall) DeleteObject(g_fontSmall);
+    if (g_fontMedium) DeleteObject(g_fontMedium);
+    if (g_fontLarge) DeleteObject(g_fontLarge);
+    if (g_fontHuge) DeleteObject(g_fontHuge);
+    if (g_fontScore) DeleteObject(g_fontScore);
+    if (g_fontBold) DeleteObject(g_fontBold);
+
+    if (g_memBitmap) DeleteObject(g_memBitmap);
+    if (g_memDC) DeleteDC(g_memDC);
+}
+
+void ResetGame() {
+    g_bird.reset();
+    g_bird.color = g_settings.birdColor;
+    g_pipes.clear();
+    g_particles.clear();
+    g_pipeTimer = 0;
+    g_score = 0;
+    g_gameSpeed = 1.0f;
+    g_groundOffset = 0;
+    g_flashTimer = 0;
+    g_shakeTimer = 0;
+    g_shakeIntensity = 0;
+    g_deathTimer = 0;
+    g_medalTimer = 0;
+    g_scorePopupTimer = 0;
+    g_scorePopupValue = 0;
+}
+
+void StartGame() {
+    ResetGame();
+    g_state = STATE_PLAYING;
+    g_bird.flap();
+
+    if (g_stats.totalGames == 0) g_stats.firstPlayed = time(nullptr);
+    g_stats.totalGames++;
+    g_stats.lastPlayed = time(nullptr);
+
+    PlaySoundFlap();
+    SpawnFlapParticles(g_bird.x, g_bird.y);
+}
+
+void GameOver() {
+    g_state = STATE_DYING;
+    g_bird.alive = false;
+    g_deathTimer = 0;
+    g_stats.totalDeaths++;
+
+    PlaySoundDie();
+    ShakeScreen(8.0f, 0.5f);
+    SpawnCrashParticles(g_bird.x, g_bird.y);
+
+    if (g_score > g_bestScore) {
+        g_bestScore = g_score;
+        g_stats.bestScore = g_bestScore;
+    }
+    if (g_score > 0) AddScoreToHistory(g_score);
+}
+
+// ============================================================
+// ОБНОВЛЕНИЕ
+// ============================================================
+void UpdateGame(float dt) {
+    g_animTimer += dt;
+
+    UpdateClouds(dt);
+    UpdateParticles(dt);
+
+    if (g_flashTimer > 0) g_flashTimer -= dt;
+    if (g_shakeTimer > 0) {
+        g_shakeTimer -= dt;
+        if (g_shakeTimer <= 0) g_shakeIntensity = 0;
+    }
+    if (g_scorePopupTimer > 0) g_scorePopupTimer -= dt;
+
+    switch (g_state) {
+        case STATE_PLAYING:
+            UpdateGameplay(dt);
+            break;
+        case STATE_DYING:
+            g_deathTimer += dt;
+            g_bird.vy += GRAVITY * dt * 60.0f;
+            if (g_bird.vy > MAX_FALL_SPEED) g_bird.vy = MAX_FALL_SPEED;
+            g_bird.y += g_bird.vy * dt * 60.0f;
+            g_bird.rotation += 0.15f * dt * 60.0f;
+            if (g_bird.rotation > 1.57f) g_bird.rotation = 1.57f;
+
+            if (g_bird.y + BIRD_H / 2 > GAME_H - GROUND_HEIGHT) {
+                g_bird.y = GAME_H - GROUND_HEIGHT - BIRD_H / 2;
+                g_bird.vy = 0;
+                if (g_deathTimer > 1.0f) {
+                    g_state = STATE_GAME_OVER;
+                    g_medalTimer = 0;
+                }
+            }
+            break;
+        case STATE_GAME_OVER:
+            g_medalTimer += dt;
+            break;
+    }
+}
+
+void UpdateGameplay(float dt) {
+    UpdateBird(dt);
+    UpdatePipes(dt);
+
+    g_pipeTimer += dt;
+    float spawnTime = PIPE_SPAWN_TIME / g_gameSpeed;
+    if (g_pipeTimer > spawnTime) {
+        g_pipeTimer = 0;
+        SpawnPipe();
+    }
+
+    CheckCollisions();
+    CheckScore();
+
+    g_gameSpeed = 1.0f + (float)g_score * 0.02f;
+    if (g_gameSpeed > 2.0f) g_gameSpeed = 2.0f;
+
+    g_groundOffset += PIPE_SPEED * g_gameSpeed * dt * 60.0f;
+    if (g_groundOffset > 24.0f) g_groundOffset -= 24.0f;
+}
+
+void UpdateBird(float dt) {
+    g_bird.update(dt);
+    if (g_bird.y < BIRD_H / 2) {
+        g_bird.y = BIRD_H / 2;
+        g_bird.vy = 0;
+    }
+}
+
+void UpdatePipes(float dt) {
+    for (int i = (int)g_pipes.size() - 1; i >= 0; i--) {
+        g_pipes[i].x -= PIPE_SPEED * g_gameSpeed * dt * 60.0f;
+        if (g_pipes[i].x + PIPE_WIDTH < -50) {
+            g_pipes.erase(g_pipes.begin() + i);
+        }
+    }
+}
+
+void UpdateParticles(float dt) {
+    for (int i = (int)g_particles.size() - 1; i >= 0; i--) {
+        g_particles[i].life -= dt;
+        if (g_particles[i].life <= 0) {
+            g_particles.erase(g_particles.begin() + i);
+            continue;
+        }
+        g_particles[i].x += g_particles[i].vx * dt * 60.0f;
+        g_particles[i].y += g_particles[i].vy * dt * 60.0f;
+        g_particles[i].vy += 0.15f * dt * 60.0f;
+    }
+}
+
+void UpdateClouds(float dt) {
+    for (auto& c : g_clouds) {
+        c.x -= c.speed * dt * 60.0f;
+        if (c.x + 100 < 0) {
+            c.x = (float)GAME_W + 50;
+            c.y = 40.0f + (float)(rand() % 200);
+        }
+    }
+}
+
+// ============================================================
+// СПАВН И КОЛЛИЗИИ
+// ============================================================
+void SpawnPipe() {
+    Pipe p;
+    p.x = (float)GAME_W;
+
+    float minGapY = 100.0f + PIPE_GAP / 2;
+    float maxGapY = GAME_H - GROUND_HEIGHT - 100.0f - PIPE_GAP / 2;
+    if (maxGapY < minGapY) maxGapY = minGapY + 50;
+
+    p.gapY = minGapY + (float)(rand() % (int)(maxGapY - minGapY));
+    g_pipes.push_back(p);
+
+    g_stats.totalPipes++;
+}
+
+void CheckCollisions() {
+    if (g_bird.y - BIRD_H / 2 <= 0) {
+        GameOver();
+        return;
+    }
+
+    if (g_bird.y + BIRD_H / 2 >= GAME_H - GROUND_HEIGHT) {
+        GameOver();
+        return;
+    }
+
+    float bx = g_bird.x - BIRD_W / 2 + 4;
+    float by = g_bird.y - BIRD_H / 2 + 4;
+    float bw = BIRD_W - 8;
+    float bh = BIRD_H - 8;
+
+    for (auto& p : g_pipes) {
+        if (p.x > bx + bw || p.x + PIPE_WIDTH < bx) continue;
+
+        float topH = p.gapY - PIPE_GAP / 2;
+        float bottomStart = p.gapY + PIPE_GAP / 2;
+
+        if (topH > 0 && by < topH) {
+            GameOver();
+            return;
+        }
+        if (bottomStart < GAME_H - GROUND_HEIGHT && by + bh > bottomStart) {
+            GameOver();
+            return;
+        }
+    }
+}
+
+void CheckScore() {
+    for (auto& p : g_pipes) {
+        if (p.scored) continue;
+        if (p.x + PIPE_WIDTH / 2 < g_bird.x) {
+            p.scored = true;
+            g_score++;
+
+            PlaySoundScore();
+            SpawnScoreParticles(g_bird.x + 40, g_bird.y);
+            ShakeScreen(2.0f, 0.1f);
+
+            g_scorePopupTimer = 0.8f;
+            g_scorePopupValue = g_score;
+            g_flashTimer = 0.1f;
+        }
+    }
+}
+
+void HandleFlap() {
+    if (g_state == STATE_MENU) {
+        StartGame();
+        return;
+    }
+    if (g_state == STATE_PLAYING) {
+        g_bird.flap();
+        g_stats.totalFlaps++;
+        PlaySoundFlap();
+        SpawnFlapParticles(g_bird.x, g_bird.y);
+    }
+    if (g_state == STATE_GAME_OVER && g_medalTimer > 0.8f) {
+        StartGame();
+    }
+}
+
+// ============================================================
+// РЕНДЕРИНГ
+// ============================================================
+void RenderBackground(HDC hdc) {
+    RECT gameRc = {GAME_X, GAME_Y, GAME_X + GAME_W, GAME_Y + GAME_H};
+    DrawGradientV(hdc, gameRc, COL_SKY_TOP, COL_SKY_BOTTOM);
+
+    // Солнце
+    int sunX = GAME_X + GAME_W - 80;
+    int sunY = GAME_Y + 70;
+    for (int i = 60; i > 0; i -= 4) {
+        int alpha = (60 - i) * 2;
+        if (alpha > 80) alpha = 80;
+        int r = 255;
+        int g = 240 - (60 - i);
+        int b = 150 - (60 - i) * 2;
+        if (g < 200) g = 200;
+        if (b < 100) b = 100;
+        DrawCircle(hdc, sunX, sunY, i, RGB(r, g, b));
+    }
+    DrawCircle(hdc, sunX, sunY, 40, RGB(255, 245, 200));
+    DrawCircle(hdc, sunX, sunY, 32, RGB(255, 250, 220));
+
+    // Облака
+    for (auto& c : g_clouds) {
+        int cx = GAME_X + (int)c.x;
+        int cy = GAME_Y + (int)c.y;
+        int size = (int)(30 * c.size);
+
+        COLORREF cloudCol;
+        if (c.layer == 0) cloudCol = RGB(230, 240, 250);
+        else if (c.layer == 1) cloudCol = RGB(240, 245, 255);
+        else cloudCol = RGB(255, 255, 255);
+
+        DrawCircle(hdc, cx, cy, size, cloudCol);
+        DrawCircle(hdc, cx - size, cy + size / 2, size * 3 / 4, cloudCol);
+        DrawCircle(hdc, cx + size, cy + size / 2, size * 3 / 4, cloudCol);
+        DrawCircle(hdc, cx - size / 2, cy - size / 2, size * 2 / 3, cloudCol);
+        DrawCircle(hdc, cx + size / 2, cy - size / 2, size * 2 / 3, cloudCol);
+    }
+}
+
+void RenderGround(HDC hdc) {
+    int groundY = GAME_Y + GAME_H - (int)GROUND_HEIGHT;
+    RECT groundRc = {GAME_X, groundY, GAME_X + GAME_W, GAME_Y + GAME_H};
+    DrawFilledRect(hdc, groundRc, COL_GROUND);
+
+    RECT grassRc = {GAME_X, groundY, GAME_X + GAME_W, groundY + 15};
+    DrawFilledRect(hdc, grassRc, COL_BUSH);
+
+    RECT darkRc = {GAME_X, groundY + 15, GAME_X + GAME_W, groundY + 18};
+    DrawFilledRect(hdc, darkRc, COL_GROUND_DARK);
+
+    int tileSize = 24;
+    int offset = (int)g_groundOffset % tileSize;
+    for (int x = GAME_X - offset; x < GAME_X + GAME_W; x += tileSize) {
+        for (int y = groundY + 18; y < GAME_Y + GAME_H; y += tileSize) {
+            int cx = (x - GAME_X) / tileSize;
+            int cy = (y - groundY) / tileSize;
+            if ((cx + cy) % 2 == 0) {
+                RECT t = {x, y, x + tileSize, y + tileSize};
+                if (t.left < GAME_X) t.left = GAME_X;
+                if (t.right > GAME_X + GAME_W) t.right = GAME_X + GAME_W;
+                if (t.top < groundY + 18) t.top = groundY + 18;
+                if (t.bottom > GAME_Y + GAME_H) t.bottom = GAME_Y + GAME_H;
+                DrawFilledRect(hdc, t, COL_GROUND_DARK);
+            }
+        }
+    }
+
+    for (auto& b : g_bushes) {
+        int bx = GAME_X + (int)b.x;
+        int by = GAME_Y + (int)b.y;
+        int size = (int)(15 * b.size);
+        if (bx < GAME_X - 50 || bx > GAME_X + GAME_W + 50) continue;
+
+        COLORREF bushCol = COL_BUSH;
+        if (b.type == 1) bushCol = RGB(110, 180, 60);
+        else if (b.type == 2) bushCol = RGB(80, 160, 45);
+
+        DrawCircle(hdc, bx, by, size, bushCol);
+        DrawCircle(hdc, bx - size, by + 5, size * 2 / 3, bushCol);
+        DrawCircle(hdc, bx + size, by + 5, size * 2 / 3, bushCol);
+    }
+}
+
+void RenderPipes(HDC hdc) {
+    for (auto& p : g_pipes) {
+        int px = GAME_X + (int)p.x;
+        int topH = (int)(p.gapY - PIPE_GAP / 2);
+        int bottomY = (int)(p.gapY + PIPE_GAP / 2);
+        int bottomH = GAME_H - (int)GROUND_HEIGHT - bottomY;
+        int pw = (int)PIPE_WIDTH;
+
+        if (px + pw < GAME_X || px > GAME_X + GAME_W) continue;
+
+        // Верхняя труба
+        if (topH > 0) {
+            int pipeTop = GAME_Y;
+            int pipeBottom = GAME_Y + topH;
+
+            RECT bodyRc = {px, pipeTop, px + pw, pipeBottom};
+            DrawGradientV(hdc, bodyRc, COL_PIPE_LIGHT, COL_PIPE);
+
+            RECT leftShadow = {px, pipeTop, px + 6, pipeBottom};
+            DrawFilledRect(hdc, leftShadow, COL_PIPE_DARK);
+
+            RECT rightShadow = {px + pw - 6, pipeTop, px + pw, pipeBottom};
+            DrawFilledRect(hdc, rightShadow, COL_PIPE_DARK);
+
+            RECT highlight = {px + 12, pipeTop, px + 20, pipeBottom};
+            DrawFilledRect(hdc, highlight, COL_PIPE_LIGHT);
+
+            int capH = 28;
+            int capOver = 5;
+            RECT capRc = {px - capOver, pipeBottom - capH, px + pw + capOver, pipeBottom};
+            DrawGradientV(hdc, capRc, COL_PIPE_LIGHT, COL_PIPE);
+
+            RECT capLeftShadow = {px - capOver, pipeBottom - capH, px - capOver + 6, pipeBottom};
+            DrawFilledRect(hdc, capLeftShadow, COL_PIPE_DARK);
+
+            RECT capRightShadow = {px + pw + capOver - 6, pipeBottom - capH, px + pw + capOver, pipeBottom};
+            DrawFilledRect(hdc, capRightShadow, COL_PIPE_DARK);
+
+            HBRUSH ob = (HBRUSH)SelectObject(hdc, GetStockObject(NULL_BRUSH));
+            HPEN pen = CreatePen(PS_SOLID, 2, COL_PIPE_DARK);
+            HGDIOBJ op = SelectObject(hdc, pen);
+            Rectangle(hdc, capRc.left, capRc.top, capRc.right, capRc.bottom);
+            SelectObject(hdc, ob);
+            SelectObject(hdc, op);
+            DeleteObject(pen);
+
+            RECT capHighlight = {px + 8, pipeBottom - capH + 4, px + 22, pipeBottom - 4};
+            DrawFilledRect(hdc, capHighlight, RGB(200, 240, 150));
+        }
+
+        // Нижняя труба
+        if (bottomH > 0) {
+            int pipeTop = GAME_Y + bottomY;
+            int pipeBottom = GAME_Y + GAME_H - (int)GROUND_HEIGHT;
+
+            RECT bodyRc = {px, pipeTop, px + pw, pipeBottom};
+            DrawGradientV(hdc, bodyRc, COL_PIPE_LIGHT, COL_PIPE);
+
+            RECT leftShadow = {px, pipeTop, px + 6, pipeBottom};
+            DrawFilledRect(hdc, leftShadow, COL_PIPE_DARK);
+
+            RECT rightShadow = {px + pw - 6, pipeTop, px + pw, pipeBottom};
+            DrawFilledRect(hdc, rightShadow, COL_PIPE_DARK);
+
+            RECT highlight = {px + 12, pipeTop, px + 20, pipeBottom};
+            DrawFilledRect(hdc, highlight, COL_PIPE_LIGHT);
+
+            int capH = 28;
+            int capOver = 5;
+            RECT capRc = {px - capOver, pipeTop, px + pw + capOver, pipeTop + capH};
+            DrawGradientV(hdc, capRc, COL_PIPE_LIGHT, COL_PIPE);
+
+            RECT capLeftShadow = {px - capOver, pipeTop, px - capOver + 6, pipeTop + capH};
+            DrawFilledRect(hdc, capLeftShadow, COL_PIPE_DARK);
+
+            RECT capRightShadow = {px + pw + capOver - 6, pipeTop, px + pw + capOver, pipeTop + capH};
+            DrawFilledRect(hdc, capRightShadow, COL_PIPE_DARK);
+
+            HBRUSH ob = (HBRUSH)SelectObject(hdc, GetStockObject(NULL_BRUSH));
+            HPEN pen = CreatePen(PS_SOLID, 2, COL_PIPE_DARK);
+            HGDIOBJ op = SelectObject(hdc, pen);
+            Rectangle(hdc, capRc.left, capRc.top, capRc.right, capRc.bottom);
+            SelectObject(hdc, ob);
+            SelectObject(hdc, op);
+            DeleteObject(pen);
+
+            RECT capHighlight = {px + 8, pipeTop + 4, px + 22, pipeTop + capH - 4};
+            DrawFilledRect(hdc, capHighlight, RGB(200, 240, 150));
+        }
+    }
+}
+
+void RenderBird(HDC hdc) {
+    int bx = GAME_X + (int)g_bird.x;
+    int by = GAME_Y + (int)g_bird.y;
+
+    XFORM xf;
+    xf.eM11 = cosf(g_bird.rotation);
+    xf.eM12 = sinf(g_bird.rotation);
+    xf.eM21 = -sinf(g_bird.rotation);
+    xf.eM22 = cosf(g_bird.rotation);
+    xf.eDx = (FLOAT)bx;
+    xf.eDy = (FLOAT)by;
+
+    int saved = SaveDC(hdc);
+    SetGraphicsMode(hdc, GM_ADVANCED);
+    SetWorldTransform(hdc, &xf);
+
+    int bw = (int)BIRD_W;
+    int bh = (int)BIRD_H;
+
+    COLORREF bodyNorm = GetBirdColor(g_bird.color, 0);
+    COLORREF bodyLight = GetBirdColor(g_bird.color, 1);
+    COLORREF bodyDark = GetBirdColor(g_bird.color, 2);
+
+    // Тело
+    DrawEllipseRect(hdc, {-bw/2, -bh/2, bw/2, bh/2}, bodyNorm);
+    DrawEllipseRect(hdc, {-bw/4, -bh/2 + 3, bw/3, bh/6}, bodyLight);
+    DrawEllipseRect(hdc, {-bw/4, bh/4, bw/3, bh/2 - 3}, bodyDark);
+
+    // Крыло
+    int wingOffset = 0;
+    if (g_state == STATE_PLAYING || g_state == STATE_DYING) {
+        if (g_bird.wingFrame == 0) wingOffset = -6;
+        else if (g_bird.wingFrame == 1) wingOffset = 0;
+        else wingOffset = 4;
+    } else wingOffset = -3;
+
+    RECT wingRc = {-bw/3, -bh/4 + wingOffset, bw/4, bh/4 + wingOffset};
+    DrawEllipseRect(hdc, wingRc, bodyDark);
+
+    RECT wingInner = {-bw/3 + 3, -bh/4 + wingOffset + 3, bw/4 - 3, bh/4 + wingOffset - 3};
+    DrawEllipseRect(hdc, wingInner, bodyLight);
+
+    // Глаз
+    int eyeX = bw/4;
+    int eyeY = -bh/6;
+    DrawCircle(hdc, eyeX, eyeY, 7, RGB(255, 255, 255));
+    DrawCircle(hdc, eyeX + 2, eyeY, 4, RGB(30, 30, 30));
+    DrawCircle(hdc, eyeX + 1, eyeY - 2, 1, RGB(255, 255, 255));
+
+    // Клюв
+    RECT beakUpper = {bw/2 - 4, -bh/8, bw/2 + 14, bh/8};
+    DrawEllipseRect(hdc, beakUpper, RGB(255, 140, 30));
+
+    RECT beakLower = {bw/2 - 4, 2, bw/2 + 12, bh/4};
+    DrawEllipseRect(hdc, beakLower, RGB(230, 100, 20));
+
+    RECT beakLine = {bw/2 - 4, 0, bw/2 + 14, 3};
+    DrawFilledRect(hdc, beakLine, RGB(180, 70, 10));
+
+    // Хвост
+    RECT tailRc = {-bw/2 - 8, -bh/8, -bw/2 + 4, bh/8};
+    DrawEllipseRect(hdc, tailRc, bodyDark);
+
+    RestoreDC(hdc, saved);
+}
+
+void RenderParticles(HDC hdc) {
+    if (!g_settings.particlesEnabled) return;
+
+    for (auto& p : g_particles) {
+        float t = p.life / p.maxLife;
+        int alpha = (int)(t * 255);
+        if (alpha < 0) alpha = 0;
+        if (alpha > 255) alpha = 255;
+
+        int px = GAME_X + (int)p.x;
+        int py = GAME_Y + (int)p.y;
+        int size = (int)(p.size * t);
+        if (size < 1) size = 1;
+
+        COLORREF bg = COL_SKY_BOTTOM;
+        int r = (GetRValue(p.color) * alpha + GetRValue(bg) * (255 - alpha)) / 255;
+        int g = (GetGValue(p.color) * alpha + GetGValue(bg) * (255 - alpha)) / 255;
+        int b = (GetBValue(p.color) * alpha + GetBValue(bg) * (255 - alpha)) / 255;
+        COLORREF c = RGB(r, g, b);
+
+        if (p.type == 1) {
+            for (int dy = -size; dy <= size; dy++) {
+                int w = size - abs(dy);
+                RECT row = {px - w, py + dy, px + w + 1, py + dy + 1};
+                DrawFilledRect(hdc, row, c);
+            }
+        } else if (p.type == 2) {
+            RECT pr = {px - size, py - size, px + size, py + size};
+            DrawFilledRect(hdc, pr, c);
+        } else {
+            DrawCircle(hdc, px, py, size, c);
+        }
+    }
+}
+
+void RenderScore(HDC hdc) {
+    if (g_state != STATE_PLAYING && g_state != STATE_DYING &&
+        g_state != STATE_PAUSED) return;
+
+    wstring s = to_wstring(g_score);
+    RECT r = {GAME_X, GAME_Y + 40, GAME_X + GAME_W, GAME_Y + 130};
+
+    RECT r4 = r; r4.left -= 2; r4.top -= 2;
+    DrawTextC(hdc, r4, s, RGB(80, 60, 40), g_fontScore,
+              DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+    RECT r5 = r; r5.left += 2; r5.top += 2;
+    DrawTextC(hdc, r5, s, RGB(80, 60, 40), g_fontScore,
+              DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+    DrawTextC(hdc, r, s, RGB(255, 255, 255), g_fontScore,
+              DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+}
+
+void RenderScorePopup(HDC hdc) {
+    if (g_scorePopupTimer <= 0) return;
+
+    float t = 1.0f - (g_scorePopupTimer / 0.8f);
+    int offsetY = (int)(-40.0f * t);
+    int px = GAME_X + (int)g_bird.x + 60;
+    int py = GAME_Y + (int)g_bird.y + offsetY;
+
+    wstring s = L"+" + to_wstring(g_scorePopupValue);
+    COLORREF c = RGB(255, (int)(220 * (1.0f - t) + 80 * t), 80);
+
+    RECT r = {px - 60, py - 20, px + 60, py + 20};
+    DrawTextC(hdc, r, s, c, g_fontMedium,
+              DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+}
+
+void RenderMenu(HDC hdc) {
+    for (int y = 0; y < GAME_H; y++) {
+        int r = 113 + (180 - 113) * y / GAME_H;
+        int g = 197 + (230 - 197) * y / GAME_H;
+        int b = 207 + (235 - 207) * y / GAME_H;
+        r = (int)(r * 0.6f);
+        g = (int)(g * 0.6f);
+        b = (int)(b * 0.6f);
+        RECT line = {GAME_X, GAME_Y + y, GAME_X + GAME_W, GAME_Y + y + 1};
+        DrawFilledRect(hdc, line, RGB(r, g, b));
+    }
+
+    RECT titleRc = {GAME_X, GAME_Y + 80, GAME_X + GAME_W, GAME_Y + 180};
+    DrawTextShadow(hdc, titleRc, L"FLAPPY BIRD",
+                   RGB(255, 220, 60), RGB(120, 60, 20),
+                   g_fontHuge, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+
+    RECT subRc = {GAME_X, GAME_Y + 170, GAME_X + GAME_W, GAME_Y + 210};
+    DrawTextShadow(hdc, subRc, L"DELUXE",
+                   RGB(255, 255, 255), RGB(100, 100, 100),
+                   g_fontMedium, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+
+    RECT bestRc = {GAME_X, GAME_Y + 240, GAME_X + GAME_W, GAME_Y + 290};
+    wstringstream bestSS;
+    bestSS << L"Лучший счёт: " << g_bestScore;
+    DrawTextShadow(hdc, bestRc, bestSS.str(),
+                   RGB(255, 255, 200), RGB(80, 80, 80),
+                   g_fontMedium, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+
+    int bw = 240, bh = 60;
+    int bx = GAME_X + (GAME_W - bw) / 2;
+    int by = GAME_Y + 350;
+
+    RECT playRc = {bx, by, bx + bw, by + bh};
+    COLORREF playCol = g_hoverPlay ? COL_BUTTON_HOVER : COL_BUTTON;
+    DrawRoundedRect(hdc, playRc, 16, playCol);
+
+    HBRUSH ob = (HBRUSH)SelectObject(hdc, GetStockObject(NULL_BRUSH));
+    HPEN pen = CreatePen(PS_SOLID, 3, RGB(120, 80, 20));
+    HGDIOBJ op = SelectObject(hdc, pen);
+    RoundRect(hdc, playRc.left, playRc.top, playRc.right, playRc.bottom, 16, 16);
+    SelectObject(hdc, ob);
+    SelectObject(hdc, op);
+    DeleteObject(pen);
+
+    DrawTextShadow(hdc, playRc, L"ИГРАТЬ",
+                   RGB(80, 40, 10), RGB(255, 200, 80),
+                   g_fontLarge, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+
+    int sw = 180, sh = 50;
+    int sx = GAME_X + (GAME_W - sw) / 2;
+    int sy = by + bh + 25;
+
+    RECT setRc = {sx, sy, sx + sw, sy + sh};
+    COLORREF setCol = g_hoverSettings ? RGB(120, 160, 220) : RGB(80, 120, 180);
+    DrawRoundedRect(hdc, setRc, 12, setCol);
+
+    HBRUSH ob2 = (HBRUSH)SelectObject(hdc, GetStockObject(NULL_BRUSH));
+    HPEN pen2 = CreatePen(PS_SOLID, 2, RGB(40, 60, 100));
+    HGDIOBJ op2 = SelectObject(hdc, pen2);
+    RoundRect(hdc, setRc.left, setRc.top, setRc.right, setRc.bottom, 12, 12);
+    SelectObject(hdc, ob2);
+    SelectObject(hdc, op2);
+    DeleteObject(pen2);
+
+    DrawTextShadow(hdc, setRc, L"НАСТРОЙКИ",
+                   RGB(255, 255, 255), RGB(30, 50, 80),
+                   g_fontMedium, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+
+    RECT hintRc = {GAME_X, GAME_Y + GAME_H - 130, GAME_X + GAME_W, GAME_Y + GAME_H - 100};
+    DrawTextC(hdc, hintRc, L"ПРОБЕЛ или ЛКМ — взмах",
+              RGB(255, 255, 255), g_fontSmall,
+              DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+
+    RECT statRc = {GAME_X + 20, GAME_Y + GAME_H - 70, GAME_X + GAME_W - 20, GAME_Y + GAME_H - 20};
+    wstringstream statSS;
+    statSS << L"Игр: " << g_stats.totalGames
+           << L"  |  Взмахов: " << g_stats.totalFlaps
+           << L"  |  Труб: " << g_stats.totalPipes;
+    DrawTextC(hdc, statRc, statSS.str(),
+              RGB(230, 230, 230), g_fontSmall,
+              DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+}
+
+void RenderMedal(HDC hdc) {
+    int medal = GetMedalType(g_score);
+    if (medal == MEDAL_NONE) return;
+
+    float t = g_medalTimer;
+    if (t > 1.0f) t = 1.0f;
+
+    int cx = GAME_X + 120;
+    int cy = GAME_Y + 320 + (int)((1.0f - t) * 60);
+    int radius = (int)(40 * t);
+    if (radius < 5) return;
+
+    COLORREF col = GetMedalColor(medal);
+
+    DrawCircle(hdc, cx + 3, cy + 3, radius, RGB(30, 30, 30));
+    DrawCircle(hdc, cx, cy, radius, col);
+
+    COLORREF inner = RGB(
+        min(255, (int)GetRValue(col) + 40),
+        min(255, (int)GetGValue(col) + 40),
+        min(255, (int)GetBValue(col) + 40));
+    DrawCircle(hdc, cx, cy, radius - 4, inner);
+
+    DrawCircle(hdc, cx - radius / 3, cy - radius / 3, radius / 4, RGB(255, 255, 255));
+
+    int starSize = radius / 2;
+    for (int i = -starSize; i <= starSize; i++) {
+        int w = starSize - abs(i);
+        RECT row = {cx - w, cy + i, cx + w + 1, cy + i + 1};
+        DrawFilledRect(hdc, row, col);
+    }
+
+    wstring name = GetMedalName(medal);
+    RECT nameRc = {cx - 80, cy + radius + 10, cx + 80, cy + radius + 35};
+    DrawTextC(hdc, nameRc, name, RGB(255, 255, 255), g_fontBold,
+              DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+}
+
+void RenderGameOver(HDC hdc) {
+    if (g_state != STATE_GAME_OVER) return;
+
+    float t = g_medalTimer;
+    if (t > 0.5f) t = 0.5f;
+    float alpha = t / 0.5f;
+
+    int dark = (int)(120 * alpha);
+    for (int y = 0; y < GAME_H; y++) {
+        RECT line = {GAME_X, GAME_Y + y, GAME_X + GAME_W, GAME_Y + y + 1};
+        int r = 113 + (180 - 113) * y / GAME_H;
+        int g = 197 + (230 - 197) * y / GAME_H;
+        int b = 207 + (235 - 207) * y / GAME_H;
+        r = (r * (255 - dark)) / 255;
+        g = (g * (255 - dark)) / 255;
+        b = (b * (255 - dark)) / 255;
+        DrawFilledRect(hdc, line, RGB(r, g, b));
+    }
+
+    int panelW = 320;
+    int panelH = 420;
+    int panelX = GAME_X + (GAME_W - panelW) / 2;
+    int panelY = GAME_Y + 100;
+
+    float animT = g_medalTimer / 0.5f;
+    if (animT > 1.0f) animT = 1.0f;
+    int offsetY = (int)((1.0f - animT) * 60);
+    panelY += offsetY;
+
+    RECT panelRc = {panelX, panelY, panelX + panelW, panelY + panelH};
+
+    RECT shadowRc = {panelRc.left + 6, panelRc.top + 6, panelRc.right + 6, panelRc.bottom + 6};
+    DrawRoundedRect(hdc, shadowRc, 16, RGB(30, 30, 30));
+    DrawRoundedRect(hdc, panelRc, 16, COL_UI_PANEL);
+
+    HBRUSH ob = (HBRUSH)SelectObject(hdc, GetStockObject(NULL_BRUSH));
+    HPEN pen = CreatePen(PS_SOLID, 3, COL_UI_BORDER);
+    HGDIOBJ op = SelectObject(hdc, pen);
+    RoundRect(hdc, panelRc.left, panelRc.top, panelRc.right, panelRc.bottom, 16, 16);
+    SelectObject(hdc, ob);
+    SelectObject(hdc, op);
+    DeleteObject(pen);
+
+    RECT titleRc = {panelRc.left, panelRc.top + 20, panelRc.right, panelRc.top + 70};
+    DrawTextShadow(hdc, titleRc, L"GAME OVER",
+                   RGB(220, 60, 60), RGB(80, 20, 20),
+                   g_fontLarge, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+
+    RenderMedal(hdc);
+
+    RECT scoreLabelRc = {panelRc.left + 20, panelRc.top + 180, panelRc.right - 20, panelRc.top + 210};
+    DrawTextC(hdc, scoreLabelRc, L"СЧЁТ", RGB(120, 100, 80), g_fontSmall,
+              DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+
+    RECT scoreRc = {panelRc.left + 20, panelRc.top + 205, panelRc.right - 20, panelRc.top + 265};
+    DrawTextC(hdc, scoreRc, to_wstring(g_score), RGB(60, 60, 60), g_fontHuge,
+              DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+
+    RECT bestLabelRc = {panelRc.left + 20, panelRc.top + 270, panelRc.right - 20, panelRc.top + 295};
+    DrawTextC(hdc, bestLabelRc, L"ЛУЧШИЙ", RGB(120, 100, 80), g_fontSmall,
+              DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+
+    RECT bestRc = {panelRc.left + 20, panelRc.top + 290, panelRc.right - 20, panelRc.top + 335};
+    DrawTextC(hdc, bestRc, to_wstring(g_bestScore), RGB(180, 130, 40), g_fontLarge,
+              DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+
+    if (g_medalTimer > 0.8f) {
+        int bw = 220, bh = 55;
+        int bx = panelX + (panelW - bw) / 2;
+        int by = panelY + panelH - 80;
+
+        RECT restartRc = {bx, by, bx + bw, by + bh};
+        COLORREF rc = g_hoverRestart ? COL_BUTTON_HOVER : COL_BUTTON;
+        DrawRoundedRect(hdc, restartRc, 14, rc);
+
+        HBRUSH ob2 = (HBRUSH)SelectObject(hdc, GetStockObject(NULL_BRUSH));
+        HPEN pen2 = CreatePen(PS_SOLID, 3, RGB(120, 80, 20));
+        HGDIOBJ op2 = SelectObject(hdc, pen2);
+        RoundRect(hdc, restartRc.left, restartRc.top, restartRc.right, restartRc.bottom, 14, 14);
+        SelectObject(hdc, ob2);
+        SelectObject(hdc, op2);
+        DeleteObject(pen2);
+
+        DrawTextShadow(hdc, restartRc, L"ЗАНОВО",
+                       RGB(80, 40, 10), RGB(255, 200, 80),
+                       g_fontLarge, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+
+        int mw = 220, mh = 40;
+        int mx = panelX + (panelW - mw) / 2;
+        int my = by + bh + 12;
+
+        RECT menuRc = {mx, my, mx + mw, my + mh};
+        COLORREF mc = g_hoverMenu ? RGB(120, 160, 220) : RGB(80, 120, 180);
+        DrawRoundedRect(hdc, menuRc, 10, mc);
+
+        HBRUSH ob3 = (HBRUSH)SelectObject(hdc, GetStockObject(NULL_BRUSH));
+        HPEN pen3 = CreatePen(PS_SOLID, 2, RGB(40, 60, 100));
+        HGDIOBJ op3 = SelectObject(hdc, pen3);
+        RoundRect(hdc, menuRc.left, menuRc.top, menuRc.right, menuRc.bottom, 10, 10);
+        SelectObject(hdc, ob3);
+        SelectObject(hdc, op3);
+        DeleteObject(pen3);
+
+        DrawTextC(hdc, menuRc, L"В МЕНЮ", RGB(255, 255, 255), g_fontMedium,
+                  DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+    }
+}
+
+void RenderSettings(HDC hdc) {
+    if (!g_showSettings) return;
+
+    for (int y = 0; y < GAME_H; y++) {
+        RECT line = {GAME_X, GAME_Y + y, GAME_X + GAME_W, GAME_Y + y + 1};
+        DrawFilledRect(hdc, line, RGB(30, 30, 50));
+    }
+
+    int panelW = 380;
+    int panelH = 520;
+    int panelX = GAME_X + (GAME_W - panelW) / 2;
+    int panelY = GAME_Y + 50;
+
+    RECT panelRc = {panelX, panelY, panelX + panelW, panelY + panelH};
+    DrawRoundedRect(hdc, panelRc, 16, COL_UI_PANEL);
+
+    HBRUSH ob = (HBRUSH)SelectObject(hdc, GetStockObject(NULL_BRUSH));
+    HPEN pen = CreatePen(PS_SOLID, 3, COL_UI_BORDER);
+    HGDIOBJ op = SelectObject(hdc, pen);
+    RoundRect(hdc, panelRc.left, panelRc.top, panelRc.right, panelRc.bottom, 16, 16);
+    SelectObject(hdc, ob);
+    SelectObject(hdc, op);
+    DeleteObject(pen);
+
+    RECT titleRc = {panelRc.left, panelRc.top + 15, panelRc.right, panelRc.top + 60};
+    DrawTextC(hdc, titleRc, L"НАСТРОЙКИ", RGB(60, 60, 60), g_fontLarge,
+              DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+
+    int y = panelRc.top + 80;
+    int labelH = 32;
+    int rowH = 55;
+
+    // Цвет птицы
+    {
+        RECT lblRc = {panelRc.left + 30, y, panelRc.right - 30, y + labelH};
+        DrawTextC(hdc, lblRc, L"Цвет птицы:", RGB(80, 80, 80), g_fontBold,
+                  DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+
+        int cx = panelRc.left + panelW / 2 - 40;
+        int cy = y + 40;
+
+        RECT leftBtn = {cx - 60, cy - 20, cx - 20, cy + 20};
+        COLORREF lbc = g_hoverSkinLeft ? RGB(200, 200, 200) : RGB(180, 180, 180);
+        DrawRoundedRect(hdc, leftBtn, 8, lbc);
+        DrawTextC(hdc, leftBtn, L"<", RGB(60, 60, 60), g_fontBold,
+                  DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+
+        RECT colRc = {cx - 25, cy - 25, cx + 25, cy + 25};
+        DrawRoundedRect(hdc, colRc, 10, GetBirdColor(g_settings.birdColor, 0));
+        DrawCircle(hdc, cx + 8, cy - 5, 5, RGB(255, 255, 255));
+        DrawCircle(hdc, cx + 9, cy - 5, 3, RGB(0, 0, 0));
+
+        RECT rightBtn = {cx + 20, cy - 20, cx + 60, cy + 20};
+        COLORREF rbc = g_hoverSkinRight ? RGB(200, 200, 200) : RGB(180, 180, 180);
+        DrawRoundedRect(hdc, rightBtn, 8, rbc);
+        DrawTextC(hdc, rightBtn, L">", RGB(60, 60, 60), g_fontBold,
+                  DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+
+        y += rowH + 30;
+    }
+
+    // Сложность
+    {
+        RECT lblRc = {panelRc.left + 30, y, panelRc.right - 30, y + labelH};
+        DrawTextC(hdc, lblRc, L"Сложность:", RGB(80, 80, 80), g_fontBold,
+                  DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+
+        wstring diffName = GetDifficultyName(g_settings.difficulty);
+
+        int cx = panelRc.left + panelW / 2;
+        int cy = y + 50;
+
+        RECT leftBtn = {cx - 120, cy - 20, cx - 80, cy + 20};
+        COLORREF lbc = g_hoverDiffLeft ? RGB(200, 200, 200) : RGB(180, 180, 180);
+        DrawRoundedRect(hdc, leftBtn, 8, lbc);
+        DrawTextC(hdc, leftBtn, L"<", RGB(60, 60, 60), g_fontBold,
+                  DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+
+        RECT nameRc = {cx - 70, cy - 22, cx + 70, cy + 22};
+        DrawRoundedRect(hdc, nameRc, 8, RGB(220, 220, 240));
+        DrawTextC(hdc, nameRc, diffName, RGB(60, 60, 100), g_fontBold,
+                  DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+
+        RECT rightBtn = {cx + 80, cy - 20, cx + 120, cy + 20};
+        COLORREF rbc = g_hoverDiffRight ? RGB(200, 200, 200) : RGB(180, 180, 180);
+        DrawRoundedRect(hdc, rightBtn, 8, rbc);
+        DrawTextC(hdc, rightBtn, L">", RGB(60, 60, 60), g_fontBold,
+                  DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+
+        y += rowH + 40;
+    }
+
+    // Тумблеры
+    auto drawToggle = [&](const wchar_t* label, bool value) {
+        RECT lblRc = {panelRc.left + 30, y, panelRc.right - 130, y + 35};
+        DrawTextC(hdc, lblRc, label, RGB(80, 80, 80), g_fontBold,
+                  DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+
+        RECT togRc = {panelRc.right - 110, y + 5, panelRc.right - 30, y + 30};
+        COLORREF bg = value ? RGB(100, 200, 100) : RGB(180, 180, 180);
+        DrawRoundedRect(hdc, togRc, 12, bg);
+
+        int knobX = value ? togRc.right - 15 : togRc.left + 15;
+        DrawCircle(hdc, knobX, (togRc.top + togRc.bottom) / 2, 11, RGB(255, 255, 255));
+
+        y += 40;
+    };
+
+    drawToggle(L"Звуки:", g_settings.soundEnabled);
+    drawToggle(L"Частицы:", g_settings.particlesEnabled);
+    drawToggle(L"Тряска экрана:", g_settings.shakeEnabled);
+
+    y += 15;
+
+    // Кнопка Назад
+    int bw = 200, bh = 50;
+    int bx = panelX + (panelW - bw) / 2;
+    int by = panelY + panelH - 70;
+
+    RECT backRc = {bx, by, bx + bw, by + bh};
+    COLORREF bc = g_hoverMenu ? RGB(120, 160, 220) : RGB(80, 120, 180);
+    DrawRoundedRect(hdc, backRc, 12, bc);
+
+    HBRUSH ob2 = (HBRUSH)SelectObject(hdc, GetStockObject(NULL_BRUSH));
+    HPEN pen2 = CreatePen(PS_SOLID, 3, RGB(40, 60, 100));
+    HGDIOBJ op2 = SelectObject(hdc, pen2);
+    RoundRect(hdc, backRc.left, backRc.top, backRc.right, backRc.bottom, 12, 12);
+    SelectObject(hdc, ob2);
+    SelectObject(hdc, op2);
+    DeleteObject(pen2);
+
+    DrawTextC(hdc, backRc, L"НАЗАД", RGB(255, 255, 255), g_fontLarge,
+              DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+}
+
+void RenderUI(HDC hdc) {
+    switch (g_state) {
+        case STATE_MENU:
+            RenderMenu(hdc);
+            break;
+        case STATE_PLAYING:
+        case STATE_PAUSED:
+            RenderScore(hdc);
+            RenderScorePopup(hdc);
+            break;
+        case STATE_DYING:
+            RenderScore(hdc);
+            break;
+        case STATE_GAME_OVER:
+            RenderScore(hdc);
+            RenderGameOver(hdc);
+            break;
+    }
+
+    if (g_showSettings) RenderSettings(hdc);
+
+    if (g_state == STATE_PAUSED) {
+        RECT pauseRc = {GAME_X, GAME_Y, GAME_X + GAME_W, GAME_Y + GAME_H};
+        DrawFilledRect(hdc, pauseRc, RGB(30, 30, 50));
+        RECT textRc = {GAME_X, GAME_Y + GAME_H / 2 - 40, GAME_X + GAME_W, GAME_Y + GAME_H / 2 + 40};
+        DrawTextC(hdc, textRc, L"ПАУЗА", RGB(255, 255, 255), g_fontHuge,
+                  DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+    }
+}
+
+void RenderFrame() {
+    if (!g_memDC) return;
+
+    RECT fullRc = {0, 0, g_memW, g_memH};
+    DrawGradientV(g_memDC, fullRc, RGB(40, 40, 60), RGB(20, 20, 30));
+
+    int shakeX = 0, shakeY = 0;
+    if (g_shakeTimer > 0 && g_shakeIntensity > 0) {
+        shakeX = (rand() % (int)(g_shakeIntensity * 2)) - (int)g_shakeIntensity;
+        shakeY = (rand() % (int)(g_shakeIntensity * 2)) - (int)g_shakeIntensity;
+    }
+
+    POINT oldOrg;
+    SetViewportOrgEx(g_memDC, GAME_X + shakeX, GAME_Y + shakeY, &oldOrg);
+
+    RenderBackground(g_memDC);
+    RenderPipes(g_memDC);
+    RenderBird(g_memDC);
+    RenderGround(g_memDC);
+    RenderParticles(g_memDC);
+
+    SetViewportOrgEx(g_memDC, oldOrg.x, oldOrg.y, nullptr);
+
+    RenderUI(g_memDC);
+
+    if (g_flashTimer > 0) {
+        RECT flashRc = {GAME_X, GAME_Y, GAME_X + GAME_W, GAME_Y + GAME_H};
+        int alpha = (int)(g_flashTimer * 1500);
+        if (alpha > 255) alpha = 255;
+        for (int y = 0; y < GAME_H; y++) {
+            RECT line = {GAME_X, GAME_Y + y, GAME_X + GAME_W, GAME_Y + y + 1};
+            DrawFilledRect(g_memDC, line, RGB(255, 255, 255 - alpha / 4));
+        }
+    }
+}
+
+// ============================================================
+// ВВОД
+// ============================================================
+void UpdateHoverStates() {
+    g_hoverPlay = false;
+    g_hoverRestart = false;
+    g_hoverMenu = false;
+    g_hoverSettings = false;
+    g_hoverSkinLeft = false;
+    g_hoverSkinRight = false;
+    g_hoverDiffLeft = false;
+    g_hoverDiffRight = false;
+
+    int mx = g_mouseX - GAME_X;
+    int my = g_mouseY - GAME_Y;
+    if (mx < -50 || mx > GAME_W + 50) return;
+
+    if (g_state == STATE_MENU && !g_showSettings) {
+        int bw = 240, bh = 60;
+        int bx = (GAME_W - bw) / 2;
+        int by = 350;
+        if (mx >= bx && mx <= bx + bw && my >= by && my <= by + bh)
+            g_hoverPlay = true;
+
+        int sw = 180, sh = 50;
+        int sx = (GAME_W - sw) / 2;
+        int sy = by + bh + 25;
+        if (mx >= sx && mx <= sx + sw && my >= sy && my <= sy + sh)
+            g_hoverSettings = true;
+    }
+
+    if (g_state == STATE_GAME_OVER && g_medalTimer > 0.8f) {
+        int panelW = 320, panelH = 420;
+        int panelX = (GAME_W - panelW) / 2;
+        int panelY = 100;
+        int bw = 220, bh = 55;
+        int bx = panelX + (panelW - bw) / 2;
+        int by = panelY + panelH - 80;
+
+        if (mx >= bx && mx <= bx + bw && my >= by && my <= by + bh)
+            g_hoverRestart = true;
+
+        int mw = 220, mh = 40;
+        int mx2 = panelX + (panelW - mw) / 2;
+        int my2 = by + bh + 12;
+        if (mx >= mx2 && mx <= mx2 + mw && my >= my2 && my <= my2 + mh)
+            g_hoverMenu = true;
+    }
+
+    if (g_showSettings) {
+        int panelW = 380, panelH = 520;
+        int panelX = (GAME_W - panelW) / 2;
+        int panelY = 50;
+
+        int bw = 200, bh = 50;
+        int bx = panelX + (panelW - bw) / 2;
+        int by = panelY + panelH - 70;
+        if (mx >= bx && mx <= bx + bw && my >= by && my <= by + bh)
+            g_hoverMenu = true;
+
+        int cy = panelY + 80 + 32 + 40;
+        int cx = panelX + panelW / 2 - 40;
+        if (mx >= cx - 60 && mx <= cx - 20 && my >= cy - 20 && my <= cy + 20)
+            g_hoverSkinLeft = true;
+        if (mx >= cx + 20 && mx <= cx + 60 && my >= cy - 20 && my <= cy + 20)
+            g_hoverSkinRight = true;
+
+        int cy2 = cy + 55 + 40 + 20;
+        int cx2 = panelX + panelW / 2;
+        if (mx >= cx2 - 120 && mx <= cx2 - 80 && my >= cy2 - 20 && my <= cy2 + 20)
+            g_hoverDiffLeft = true;
+        if (mx >= cx2 + 80 && mx <= cx2 + 120 && my >= cy2 - 20 && my <= cy2 + 20)
+            g_hoverDiffRight = true;
+    }
+}
+
+void OnMouseClick(int x, int y) {
+    int mx = x - GAME_X;
+    int my = y - GAME_Y;
+
+    if (g_showSettings) {
+        int panelW = 380, panelH = 520;
+        int panelX = (GAME_W - panelW) / 2;
+        int panelY = 50;
+
+        int bw = 200, bh = 50;
+        int bx = panelX + (panelW - bw) / 2;
+        int by = panelY + panelH - 70;
+        if (mx >= bx && mx <= bx + bw && my >= by && my <= by + bh) {
+            g_showSettings = false;
+            SaveSettings();
+            return;
+        }
+
+        int cy = panelY + 80 + 32 + 40;
+        int cx = panelX + panelW / 2 - 40;
+        if (mx >= cx - 60 && mx <= cx - 20 && my >= cy - 20 && my <= cy + 20) {
+            g_settings.birdColor--;
+            if (g_settings.birdColor < 0) g_settings.birdColor = BIRD_COUNT - 1;
+            g_bird.color = g_settings.birdColor;
+            Beep(700, 30);
+            return;
+        }
+        if (mx >= cx + 20 && mx <= cx + 60 && my >= cy - 20 && my <= cy + 20) {
+            g_settings.birdColor = (g_settings.birdColor + 1) % BIRD_COUNT;
+            g_bird.color = g_settings.birdColor;
+            Beep(700, 30);
+            return;
+        }
+
+        int cy2 = cy + 55 + 40 + 20;
+        int cx2 = panelX + panelW / 2;
+        if (mx >= cx2 - 120 && mx <= cx2 - 80 && my >= cy2 - 20 && my <= cy2 + 20) {
+            g_settings.difficulty--;
+            if (g_settings.difficulty < 0) g_settings.difficulty = 2;
+            Beep(600, 30);
+            return;
+        }
+        if (mx >= cx2 + 80 && mx <= cx2 + 120 && my >= cy2 - 20 && my <= cy2 + 20) {
+            g_settings.difficulty = (g_settings.difficulty + 1) % 3;
+            Beep(600, 30);
+            return;
+        }
+
+        int y = panelY + 80;
+        int rowH = 55;
+        y += rowH + 30;
+        y += rowH + 40;
+        int togglesY = y;
+        for (int i = 0; i < 3; i++) {
+            int ty = togglesY + i * 40;
+            int tx1 = panelX + panelW - 110;
+            int tx2 = panelX + panelW - 30;
+            if (mx >= tx1 && mx <= tx2 && my >= ty + 5 && my <= ty + 30) {
+                if (i == 0) g_settings.soundEnabled = !g_settings.soundEnabled;
+                else if (i == 1) g_settings.particlesEnabled = !g_settings.particlesEnabled;
+                else if (i == 2) g_settings.shakeEnabled = !g_settings.shakeEnabled;
+                Beep(800, 30);
+                return;
+            }
+        }
+        return;
+    }
+
+    if (g_state == STATE_MENU) {
+        int bw = 240, bh = 60;
+        int bx = (GAME_W - bw) / 2;
+        int by = 350;
+        if (mx >= bx && mx <= bx + bw && my >= by && my <= by + bh) {
+            StartGame();
+            return;
+        }
+
+        int sw = 180, sh = 50;
+        int sx = (GAME_W - sw) / 2;
+        int sy = by + bh + 25;
+        if (mx >= sx && mx <= sx + sw && my >= sy && my <= sy + sh) {
+            g_showSettings = true;
+            Beep(700, 30);
+            return;
+        }
+
+        if (mx >= 0 && mx <= GAME_W && my >= 0 && my <= GAME_H) {
+            StartGame();
+            return;
+        }
+    }
+
+    if (g_state == STATE_PLAYING) {
+        HandleFlap();
+        return;
+    }
+
+    if (g_state == STATE_GAME_OVER && g_medalTimer > 0.8f) {
+        int panelW = 320, panelH = 420;
+        int panelX = (GAME_W - panelW) / 2;
+        int panelY = 100;
+        int bw = 220, bh = 55;
+        int bx = panelX + (panelW - bw) / 2;
+        int by = panelY + panelH - 80;
+        if (mx >= bx && mx <= bx + bw && my >= by && my <= by + bh) {
+            StartGame();
+            return;
+        }
+
+        int mw = 220, mh = 40;
+        int mx2 = panelX + (panelW - mw) / 2;
+        int my2 = by + bh + 12;
+        if (mx >= mx2 && mx <= mx2 + mw && my >= my2 && my <= my2 + mh) {
+            g_state = STATE_MENU;
+            ResetGame();
+            return;
+        }
+    }
+
+    if (g_state == STATE_PAUSED) {
+        g_state = STATE_PLAYING;
+        return;
+    }
+}
+
+void OnKeyPressed(int vk) {
+    switch (vk) {
+        case VK_SPACE:
+            if (g_state == STATE_MENU) StartGame();
+            else if (g_state == STATE_PLAYING) HandleFlap();
+            else if (g_state == STATE_GAME_OVER && g_medalTimer > 0.8f) StartGame();
+            break;
+        case VK_RETURN:
+            if (g_state == STATE_MENU) StartGame();
+            else if (g_state == STATE_GAME_OVER && g_medalTimer > 0.8f) StartGame();
+            break;
+        case 'P':
+            if (g_state == STATE_PLAYING) g_state = STATE_PAUSED;
+            else if (g_state == STATE_PAUSED) g_state = STATE_PLAYING;
+            break;
+        case VK_ESCAPE:
+            if (g_showSettings) { g_showSettings = false; SaveSettings(); }
+            else if (g_state == STATE_PLAYING || g_state == STATE_PAUSED || g_state == STATE_GAME_OVER) {
+                g_state = STATE_MENU; ResetGame();
+            } else PostMessageW(g_hwnd, WM_CLOSE, 0, 0);
+            break;
+        case 'R':
+            if (g_state == STATE_GAME_OVER || g_state == STATE_PLAYING) StartGame();
+            break;
+        case VK_F1:
+            g_showSettings = !g_showSettings;
+            break;
+        case VK_F2:
+            g_settings.soundEnabled = !g_settings.soundEnabled;
+            break;
+        case VK_F5:
+            StartGame();
+            break;
+    }
+}
+
+void Tick(float dt) {
+    UpdateGame(dt);
+    UpdateHoverStates();
+}
+
+void OnResize(int w, int h) {
+    if (w < 100) w = 100;
+    if (h < 100) h = 100;
+
+    if (g_memBitmap) DeleteObject(g_memBitmap);
+    if (g_memDC) DeleteDC(g_memDC);
+
+    g_memW = w;
+    g_memH = h;
+
+    HDC hdc = GetDC(g_hwnd);
+    g_memDC = CreateCompatibleDC(hdc);
+
+    BITMAPINFO bmi = {};
+    bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+    bmi.bmiHeader.biWidth = w;
+    bmi.bmiHeader.biHeight = -h;
+    bmi.bmiHeader.biPlanes = 1;
+    bmi.bmiHeader.biBitCount = 32;
+    bmi.bmiHeader.biCompression = BI_RGB;
+
+    void* bits = nullptr;
+    g_memBitmap = CreateDIBSection(hdc, &bmi, DIB_RGB_COLORS, &bits, nullptr, 0);
+    g_pixels = (uint32_t*)bits;
+
+    SelectObject(g_memDC, g_memBitmap);
+    ReleaseDC(g_hwnd, hdc);
+}
+
+// ============================================================
+// WINDOW PROC
+// ============================================================
+LRESULT CALLBACK WindowProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
+    switch (msg) {
+        case WM_CREATE:
+            return 0;
+
+        case WM_SIZE: {
+            int w = LOWORD(lp);
+            int h = HIWORD(lp);
+            OnResize(w, h);
+            return 0;
+        }
+
+        case WM_PAINT: {
+            PAINTSTRUCT ps;
+            HDC hdc = BeginPaint(hwnd, &ps);
+            if (g_memDC) {
+                RenderFrame();
+                BitBlt(hdc, 0, 0, g_memW, g_memH, g_memDC, 0, 0, SRCCOPY);
+            }
+            EndPaint(hwnd, &ps);
+            return 0;
+        }
+
+        case WM_ERASEBKGND:
+            return 1;
+
+        case WM_TIMER: {
+            if (wp == 1) {
+                static DWORD lastTick = GetTickCount();
+                DWORD now = GetTickCount();
+                float dt = (now - lastTick) / 1000.0f;
+                lastTick = now;
+                if (dt > 0.1f) dt = 0.1f;
+                if (dt < 0.001f) dt = 0.016f;
+                Tick(dt);
+                InvalidateRect(hwnd, nullptr, FALSE);
+            }
+            return 0;
+        }
+
+        case WM_MOUSEMOVE: {
+            g_mouseX = GET_X_LPARAM(lp);
+            g_mouseY = GET_Y_LPARAM(lp);
+            UpdateHoverStates();
+            return 0;
+        }
+
+        case WM_LBUTTONDOWN: {
+            OnMouseClick(GET_X_LPARAM(lp), GET_Y_LPARAM(lp));
+            SetCapture(hwnd);
+            return 0;
+        }
+
+        case WM_LBUTTONUP: {
+            ReleaseCapture();
+            return 0;
+        }
+
+        case WM_RBUTTONDOWN: {
+            if (g_state == STATE_PLAYING) g_state = STATE_PAUSED;
+            else if (g_state == STATE_PAUSED) g_state = STATE_PLAYING;
+            else if (g_state == STATE_GAME_OVER) StartGame();
+            return 0;
+        }
+
+        case WM_KEYDOWN: {
+            if (!g_keys[wp]) {
+                g_keys[wp] = true;
+                OnKeyPressed((int)wp);
+            }
+            return 0;
+        }
+
+        case WM_KEYUP: {
+            g_keys[wp] = false;
+            return 0;
+        }
+
+        case WM_GETMINMAXINFO: {
+            MINMAXINFO* mmi = (MINMAXINFO*)lp;
+            mmi->ptMinTrackSize.x = WINDOW_W;
+            mmi->ptMinTrackSize.y = WINDOW_H;
+            mmi->ptMaxTrackSize.x = WINDOW_W + 200;
+            mmi->ptMaxTrackSize.y = WINDOW_H + 200;
+            return 0;
+        }
+
+        case WM_CLOSE: {
+            SaveSettings();
+            DestroyWindow(hwnd);
+            return 0;
+        }
+
+        case WM_DESTROY: {
+            KillTimer(hwnd, 1);
+            PostQuitMessage(0);
+            return 0;
+        }
+    }
+    return DefWindowProcW(hwnd, msg, wp, lp);
+}
+
+// ============================================================
+// ГЛАВНАЯ ФУНКЦИЯ
+// ============================================================
+int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int nCmdShow) {
+    srand((unsigned)time(nullptr));
+
+    WNDCLASSEXW wc = {};
+    wc.cbSize = sizeof(wc);
+    wc.style = CS_HREDRAW | CS_VREDRAW | CS_DBLCLKS;
+    wc.lpfnWndProc = WindowProc;
+    wc.hInstance = hInst;
+    wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
+    wc.hbrBackground = (HBRUSH)GetStockObject(BLACK_BRUSH);
+    wc.lpszClassName = L"FlappyBirdDeluxeClass";
+    wc.hIcon = LoadIcon(nullptr, IDI_APPLICATION);
+
+    if (!RegisterClassExW(&wc)) return 1;
+
+    RECT rc = {0, 0, WINDOW_W, WINDOW_H};
+    AdjustWindowRect(&rc, WS_OVERLAPPEDWINDOW & ~WS_MAXIMIZEBOX & ~WS_THICKFRAME, FALSE);
+
+    HWND hwnd = CreateWindowExW(
+        0, L"FlappyBirdDeluxeClass",
+        L"Flappy Bird Deluxe",
+        WS_OVERLAPPEDWINDOW & ~WS_MAXIMIZEBOX & ~WS_THICKFRAME,
+        CW_USEDEFAULT, CW_USEDEFAULT,
+        rc.right - rc.left, rc.bottom - rc.top,
+        nullptr, nullptr, hInst, nullptr
+    );
+
+    if (!hwnd) return 1;
+
+    InitGame(hwnd);
+    ShowWindow(hwnd, nCmdShow);
+    UpdateWindow(hwnd);
+
+    MSG msg = {};
+    while (GetMessageW(&msg, nullptr, 0, 0)) {
+        TranslateMessage(&msg);
+        DispatchMessageW(&msg);
+    }
+
+    ShutdownGame();
+    return (int)msg.wParam;
+}
